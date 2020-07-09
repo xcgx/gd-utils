@@ -640,7 +640,7 @@ async function create_folders ({ source, old_mapping, folders, root, task_id, se
 
   const loop = setInterval(() => {
     const now = dayjs().format('HH:mm:ss')
-    const message = `${now} | 已创建目录 ${count} | 网络请求 进行中${limit.activeCount}/排队中${limit.pendingCount}`
+    const message = `${now} | 已创建目录 ${count} | 网络请求 进行中${limit.activeCount}/排队中${limit.pendingCount}\n`
     print_progress(message)
   }, 1000)
 
