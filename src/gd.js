@@ -527,7 +527,7 @@ async function copy_files ({ files, mapping, service_account, root, task_id }) {
 
   const loop = setInterval(() => {
     const now = dayjs().format('HH:mm:ss')
-    const message = `${now} | 已复制文件数 ${count} | 排队中文件数 ${files.length}`
+    const message = `${now} | 已复制文件数 ${count} | 排队中文件数 ${files.length}\n`
     print_progress(message)
   }, 1000)
 
