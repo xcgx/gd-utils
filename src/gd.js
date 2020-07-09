@@ -181,7 +181,7 @@ async function walk_and_save ({ fid, not_teamdrive, update, service_account }) {
     const now = dayjs().format('HH:mm:ss')
     const message = `${now} | 已获取对象 ${result.length} | 网络请求 进行中${limit.activeCount}/排队中${limit.pendingCount}\n`
     print_progress(message)
-  }, 1000)
+  }, 5000)
 
   async function recur (parent) {
     let files, should_save
@@ -397,19 +397,34 @@ async function get_info_by_id (fid, use_sa) {
 }
 
 async function user_choose () {
-  const answer = await prompts({
-    type: 'select',
+  const response = await prompts({
+    type: 'number',
     name: 'value',
-    message: '检测到上次的复制记录，是否继续？',
-    choices: [
-      { title: 'Continue', description: '从上次中断的地方继续', value: 'continue' },
-      { title: 'Restart', description: '无视已存在的记录，重新复制', value: 'restart' },
-      { title: 'Exit', description: '直接退出', value: 'exit' }
-    ],
-    initial: 0
+    message: `请输入选择（1/2/3）：
+    1、继续
+    2、重来
+    3、退出
+    `,
+    validate: value => [1, 2, 3].includes(value) ? true : `必须输入 1/2/3`
   })
-  return answer.value
+  const choices = ['', 'continue', 'restart', 'exit']
+  return choices[response.value]
 }
+
+//async function user_choose () {
+//  const answer = await prompts({
+//    type: 'select',
+//    name: 'value',
+//    message: '检测到上次的复制记录，是否继续？',
+//    choices: [
+//      { title: 'Continue', description: '从上次中断的地方继续', value: 'continue' },
+//      { title: 'Restart', description: '无视已存在的记录，重新复制', value: 'restart' },
+//      { title: 'Exit', description: '直接退出', value: 'exit' }
+//    ],
+//    initial: 0
+//  })
+//  return answer.value
+//}
 
 async function copy ({ source, target, name, min_size, update, not_teamdrive, service_account, dncnr, is_server }) {
   target = target || DEFAULT_TARGET
@@ -529,8 +544,7 @@ async function copy_files ({ files, mapping, service_account, root, task_id }) {
     const now = dayjs().format('HH:mm:ss')
     const message = `${now} | 已复制文件数 ${count} | 排队中文件数 ${files.length}\n`
     print_progress(message)
-    clear_output()
-  }, 1000)
+  }, 10000)
 
   let count = 0
   let concurrency = 0
@@ -643,7 +657,7 @@ async function create_folders ({ source, old_mapping, folders, root, task_id, se
     const now = dayjs().format('HH:mm:ss')
     const message = `${now} | 已创建目录 ${count} | 网络请求 进行中${limit.activeCount}/排队中${limit.pendingCount}\n`
     print_progress(message)
-  }, 1000)
+  }, 8000)
 
   while (same_levels.length) {
     const same_levels_missed = same_levels.filter(v => !mapping[v.id])
