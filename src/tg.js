@@ -4,7 +4,7 @@ const axios = require('@viegg/axios')
 const HttpsProxyAgent = require('https-proxy-agent')
 
 const { db } = require('../db')
-const { gen_count_body, validate_fid, real_copy, get_name_by_id } = require('./gd')
+const { gen_count_body, validate_fid, real_copy, get_name_by_id, get_info_by_id, copy_file } = require('./gd')
 const { AUTH, DEFAULT_TARGET, USE_PERSONAL_AUTH } = require('../config')
 const { tg_token } = AUTH
 const gen_link = (fid, text) => `<a href="https://drive.google.com/drive/folders/${fid}">${text || fid}</a>`
@@ -18,7 +18,7 @@ const FID_TO_NAME = {}
 async function get_folder_name (fid) {
   let name = FID_TO_NAME[fid]
   if (name) return name
-  name = await get_name_by_id(fid)
+  name = await get_name_by_id(fid, !USE_PERSONAL_AUTH)
   return FID_TO_NAME[fid] = name
 }
 
@@ -136,6 +136,10 @@ function send_choice ({ fid, chat_id }) {
         [
           { text: '文件统计', callback_data: `count ${fid}` },
           { text: '开始复制', callback_data: `copy ${fid}` }
+        ],
+        [
+          { text: '强制刷新', callback_data: `update ${fid}` },
+          { text: '清除按钮', callback_data: `clear_button` }
         ]
       ].concat(gen_bookmark_choices(fid))
     }
@@ -175,8 +179,8 @@ async function send_all_tasks (chat_id) {
     // const description = err.response && err.response.data && err.response.data.description
     // if (description && description.includes('message is too long')) {
     if (true) {
-      const text = [headers].concat(records).map(v => v.join('\t')).join('\n')
-      return sm({ chat_id, parse_mode: 'HTML', text: `所有拷贝任务：\n<pre>${text}</pre>` })
+      const text = [headers].concat(records.slice(-100)).map(v => v.join('\t')).join('\n')
+      return sm({ chat_id, parse_mode: 'HTML', text: `所有拷贝任务(只显示最近100条)：\n<pre>${text}</pre>` })
     }
     console.error(err)
   })
@@ -222,10 +226,9 @@ async function send_task_info ({ task_id, chat_id }) {
   // get_task_info 在task目录数超大时比较吃cpu，以后如果最好把mapping也另存一张表
   if (!message_id || status !== 'copying') return
   const loop = setInterval(async () => {
-    const url = `https://api.telegram.org/bot${tg_token}/editMessageText`
     const { text, status } = await get_task_info(task_id)
     if (status !== 'copying') clearInterval(loop)
-    axins.post(url, { chat_id, message_id, text, parse_mode: 'HTML' }).catch(e => console.error(e.message))
+    sm({ chat_id, message_id, text, parse_mode: 'HTML' }, 'editMessageText')
   }, 10 * 1000)
 }
 
@@ -234,6 +237,14 @@ async function tg_copy ({ fid, target, chat_id, update }) { // return task_id
   if (!target) {
     sm({ chat_id, text: '请输入目的地ID或先在config.js里设置默认复制目的地ID(DEFAULT_TARGET)' })
     return
+  }
+  const file = await get_info_by_id(fid, !USE_PERSONAL_AUTH)
+  if (file && file.mimeType !== 'application/vnd.google-apps.folder') {
+    return copy_file(fid, target, !USE_PERSONAL_AUTH).then(data => {
+      sm({ chat_id, parse_mode: 'HTML', text: `复制单文件成功，文件位置：${gen_link(target)}` })
+    }).catch(e => {
+      sm({ chat_id, text: `复制单文件失败，失败消息：${e.message}` })
+    })
   }
 
   let record = db.prepare('select id, status from task where source=? and target=?').get(fid, target)
@@ -260,7 +271,7 @@ async function tg_copy ({ fid, target, chat_id, update }) { // return task_id
       if (!record) record = {}
       console.error('复制失败', fid, '-->', target)
       console.error(err)
-      sm({ chat_id, text: '复制失败，失败消息：' + err.message })
+      sm({ chat_id, text: (task_id || '') + '任务出错，错误消息：' + err.message })
     })
 
   while (!record) {
@@ -320,11 +331,14 @@ ${table}</pre>`
   })
 }
 
-function sm (data) {
-  const url = `https://api.telegram.org/bot${tg_token}/sendMessage`
+function sm (data, endpoint) {
+  endpoint = endpoint || 'sendMessage'
+  const url = `https://api.telegram.org/bot${tg_token}/${endpoint}`
   return axins.post(url, data).catch(err => {
     // console.error('fail to post', url, data)
     console.error('fail to send message to tg:', err.message)
+    const err_data = err.response && err.response.data
+    err_data && console.error(err_data)
   })
 }
 
@@ -336,9 +350,11 @@ function extract_fid (text) {
     if (!text.startsWith('http')) text = 'https://' + text
     const u = new URL(text)
     if (u.pathname.includes('/folders/')) {
-      const reg = /[^/?]+$/
-      const match = u.pathname.match(reg)
-      return match && match[0]
+      return u.pathname.split('/').map(v => v.trim()).filter(v => v).pop()
+    } else if (u.pathname.includes('/file/')) {
+      const file_reg = /file\/d\/([a-zA-Z0-9_-]+)/
+      const file_match = u.pathname.match(file_reg)
+      return file_match && file_match[1]
     }
     return u.searchParams.get('id')
   } catch (e) {
@@ -347,7 +363,8 @@ function extract_fid (text) {
 }
 
 function extract_from_text (text) {
-  const reg = /https?:\/\/drive.google.com\/[^\s]+/g
+  // const reg = /https?:\/\/drive.google.com\/[^\s]+/g
+  const reg = /https?:\/\/drive.google.com\/[a-zA-Z0-9_\\/?=&-]+/g
   const m = text.match(reg)
   return m && extract_fid(m[0])
 }

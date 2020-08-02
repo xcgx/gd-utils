@@ -42,16 +42,17 @@ router.get('/api/gdurl/count', async ctx => {
 router.post('/api/gdurl/tgbot', async ctx => {
   const { body } = ctx.request
   console.log('ctx.ip', ctx.ip) // 可以只允许tg服务器的ip
-  console.log('tg message:', body)
+  console.log('tg message:', JSON.stringify(body, null, '  '))
   if (TG_IPLIST && !TG_IPLIST.includes(ctx.ip)) return ctx.body = 'invalid ip'
   ctx.body = '' // 早点释放连接
   const message = body.message || body.edited_message
+  const message_str = JSON.stringify(message)
 
   const { callback_query } = body
   if (callback_query) {
-    const { id, data } = callback_query
+    const { id, message, data } = callback_query
     const chat_id = callback_query.from.id
-    const [action, fid, target] = data.split(' ')
+    const [action, fid, target] = data.split(' ').filter(v => v)
     if (action === 'count') {
       if (counting[fid]) return sm({ chat_id, text: fid + ' 正在统计，请稍等片刻' })
       counting[fid] = true
@@ -67,29 +68,41 @@ router.post('/api/gdurl/tgbot', async ctx => {
       tg_copy({ fid, target: get_target_by_alias(target), chat_id }).then(task_id => {
         task_id && sm({ chat_id, text: `开始复制，任务ID: ${task_id} 可输入 /task ${task_id} 查询进度` })
       }).finally(() => COPYING_FIDS[fid] = false)
+    } else if (action === 'update') {
+      if (counting[fid]) return sm({ chat_id, text: fid + ' 正在统计，请稍等片刻' })
+      counting[fid] = true
+      send_count({ fid, chat_id, update: true }).finally(() => {
+        delete counting[fid]
+      })
+    } else if (action === 'clear_button') {
+      const { message_id, text } = message || {}
+      if (message_id) sm({ chat_id, message_id, text, parse_mode: 'HTML' }, 'editMessageText')
     }
     return reply_cb_query({ id, data }).catch(console.error)
   }
 
   const chat_id = message && message.chat && message.chat.id
-  const text = message && message.text && message.text.trim()
+  const text = (message && message.text && message.text.trim()) || ''
   let username = message && message.from && message.from.username
   username = username && String(username).toLowerCase()
   let user_id = message && message.from && message.from.id
   user_id = user_id && String(user_id).toLowerCase()
-  if (!chat_id || !text || !tg_whitelist.some(v => {
+  if (!chat_id || !tg_whitelist.some(v => {
     v = String(v).toLowerCase()
     return v === username || v === user_id
-  })) return console.warn('异常请求')
+  })) {
+    chat_id && sm({ chat_id, text: '您的用户名或ID不在机器人的白名单中，如果是您配置的机器人，请先到config.js中配置自己的username' })
+    return console.warn('收到非白名单用户的请求')
+  }
 
-  const fid = extract_fid(text) || extract_from_text(text)
+  const fid = extract_fid(text) || extract_from_text(text) || extract_from_text(message_str)
   const no_fid_commands = ['/task', '/help', '/bm']
   if (!no_fid_commands.some(cmd => text.startsWith(cmd)) && !validate_fid(fid)) {
     return sm({ chat_id, text: '未识别出分享ID' })
   }
   if (text.startsWith('/help')) return send_help(chat_id)
   if (text.startsWith('/bm')) {
-    const [cmd, action, alias, target] = text.split(' ').map(v => v.trim())
+    const [cmd, action, alias, target] = text.split(' ').map(v => v.trim()).filter(v => v)
     if (!action) return send_all_bookmarks(chat_id)
     if (action === 'set') {
       if (!alias || !target) return sm({ chat_id, text: '别名和目标ID不能为空' })
@@ -115,7 +128,7 @@ router.post('/api/gdurl/tgbot', async ctx => {
       delete counting[fid]
     }
   } else if (text.startsWith('/copy')) {
-    let target = text.replace('/copy', '').replace(' -u', '').trim().split(' ').map(v => v.trim())[1]
+    let target = text.replace('/copy', '').replace(' -u', '').trim().split(' ').map(v => v.trim()).filter(v => v)[1]
     target = get_target_by_alias(target) || target
     if (target && !validate_fid(target)) return sm({ chat_id, text: `目标ID ${target} 格式不正确` })
     const update = text.endsWith(' -u')
@@ -143,8 +156,8 @@ router.post('/api/gdurl/tgbot', async ctx => {
       return running_tasks.forEach(v => send_task_info({ chat_id, task_id: v.id }).catch(console.error))
     }
     send_task_info({ task_id, chat_id }).catch(console.error)
-  } else if (text.includes('drive.google.com/') || validate_fid(text)) {
-    return send_choice({ fid: fid || text, chat_id }).catch(console.error)
+  } else if (message_str.includes('drive.google.com/') || validate_fid(text)) {
+    return send_choice({ fid: fid || text, chat_id })
   } else {
     sm({ chat_id, text: '暂不支持此命令' })
   }

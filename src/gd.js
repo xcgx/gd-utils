@@ -4,22 +4,42 @@ const dayjs = require('dayjs')
 const prompts = require('prompts')
 const pLimit = require('p-limit')
 const axios = require('@viegg/axios')
-const HttpsProxyAgent = require('https-proxy-agent')
 const { GoogleToken } = require('gtoken')
 const handle_exit = require('signal-exit')
+const { argv } = require('yargs')
 
-const { AUTH, RETRY_LIMIT, PARALLEL_LIMIT, TIMEOUT_BASE, TIMEOUT_MAX, LOG_DELAY, PAGE_SIZE, DEFAULT_TARGET } = require('../config')
+let { PARALLEL_LIMIT } = require('../config')
+PARALLEL_LIMIT = argv.l || argv.limit || PARALLEL_LIMIT
+
+const { AUTH, RETRY_LIMIT, TIMEOUT_BASE, TIMEOUT_MAX, LOG_DELAY, PAGE_SIZE, DEFAULT_TARGET } = require('../config')
 const { db } = require('../db')
 const { make_table, make_tg_table, make_html, summary } = require('./summary')
+const { gen_tree_html } = require('./tree')
 
-const FILE_EXCEED_MSG = '您的团队盘文件数已超限(40万)，停止复制，请将未复制完成的文件夹移到另一个团队盘中，再执行一遍复制指令即可接上进度继续复制'
+const FILE_EXCEED_MSG = '您的团队盘文件数已超限(40万)，停止复制。请将未复制完成的文件夹(或者它的任意子文件夹)移到另一个(sa也有权限的)团队盘中，再执行一遍复制指令即可接上进度继续复制(是的你没看错...)'
 const FOLDER_TYPE = 'application/vnd.google-apps.folder'
 const sleep = ms => new Promise((resolve, reject) => setTimeout(resolve, ms))
-const { https_proxy } = process.env
-const axins = axios.create(https_proxy ? { httpsAgent: new HttpsProxyAgent(https_proxy) } : {})
 
+const { https_proxy, http_proxy, all_proxy } = process.env
+const proxy_url = https_proxy || http_proxy || all_proxy
+
+let axins
+if (proxy_url) {
+  console.log('使用代理：', proxy_url)
+  let ProxyAgent
+  try {
+    ProxyAgent = require('proxy-agent')
+  } catch (e) { // 没执行 npm i proxy-agent
+    ProxyAgent = require('https-proxy-agent')
+  }
+  axins = axios.create({ httpsAgent: new ProxyAgent(proxy_url) })
+} else {
+  axins = axios.create({})
+}
+
+const SA_LOCATION = argv.sa || 'sa'
 const SA_BATCH_SIZE = 1000
-const SA_FILES = fs.readdirSync(path.join(__dirname, '../sa')).filter(v => v.endsWith('.json'))
+const SA_FILES = fs.readdirSync(path.join(__dirname, '..', SA_LOCATION)).filter(v => v.endsWith('.json'))
 SA_FILES.flag = 0
 let SA_TOKENS = get_sa_batch()
 
@@ -41,7 +61,7 @@ function get_sa_batch () {
   SA_FILES.flag = new_flag
   return files.map(filename => {
     const gtoken = new GoogleToken({
-      keyFile: path.join(__dirname, '../sa', filename),
+      keyFile: path.join(__dirname, '..', SA_LOCATION, filename),
       scope: ['https://www.googleapis.com/auth/drive']
     })
     return { gtoken, expires: 0 }
@@ -80,6 +100,8 @@ async function gen_count_body ({ fid, type, update, service_account }) {
       return (typeof smy === 'string') ? smy : JSON.stringify(smy)
     }
   }
+  const file = await get_info_by_id(fid, service_account)
+  if (file && file.mimeType !== FOLDER_TYPE) return render_smy(summary([file]), type)
 
   let info, smy
   const record = db.prepare('SELECT * FROM gd WHERE fid = ?').get(fid)
@@ -129,7 +151,9 @@ async function count ({ fid, update, sort, type, output, not_teamdrive, service_
 function get_out_str ({ info, type, sort }) {
   const smy = summary(info, sort)
   let out_str
-  if (type === 'html') {
+  if (type === 'tree') {
+    out_str = gen_tree_html(info)
+  } else if (type === 'html') {
     out_str = make_html(smy)
   } else if (type === 'json') {
     out_str = JSON.stringify(smy)
@@ -173,7 +197,7 @@ function get_all_by_fid (fid) {
 }
 
 async function walk_and_save ({ fid, not_teamdrive, update, service_account }) {
-  const result = []
+  let result = []
   const not_finished = []
   const limit = pLimit(PARALLEL_LIMIT)
 
@@ -202,7 +226,7 @@ async function walk_and_save ({ fid, not_teamdrive, update, service_account }) {
     should_save && save_files_to_db(parent, files)
     const folders = files.filter(v => v.mimeType === FOLDER_TYPE)
     files.forEach(v => v.parent = parent)
-    result.push(...files)
+    result = result.concat(files)
     return Promise.all(folders.map(v => recur(v.id)))
   }
   try {
@@ -244,15 +268,21 @@ async function ls_folder ({ fid, not_teamdrive, service_account }) {
   params.pageSize = Math.min(PAGE_SIZE, 1000)
   // const use_sa = (fid !== 'root') && (service_account || !not_teamdrive) // 不带参数默认使用sa
   const use_sa = (fid !== 'root') && service_account
-  const headers = await gen_headers(use_sa)
+  // const headers = await gen_headers(use_sa)
+  // 对于直接子文件数超多的目录（1ctMwpIaBg8S1lrZDxdynLXJpMsm5guAl），可能还没列完，access_token就过期了
+  // 由于需要nextPageToken才能获取下一页的数据，所以无法用并行请求，测试发现每次获取1000个文件的请求大多需要20秒以上才能完成
+  const gtoken = use_sa && (await get_sa_token()).gtoken
   do {
     if (pageToken) params.pageToken = pageToken
     let url = 'https://www.googleapis.com/drive/v3/files'
     url += '?' + params_to_query(params)
-    const payload = { headers, timeout: TIMEOUT_BASE }
     let retry = 0
     let data
+    const payload = { timeout: TIMEOUT_BASE }
     while (!data && (retry < RETRY_LIMIT)) {
+      const access_token = gtoken ? (await gtoken.getToken()).access_token : (await get_access_token())
+      const headers = { authorization: 'Bearer ' + access_token }
+      payload.headers = headers
       try {
         data = (await axins.get(url, payload)).data
       } catch (err) {
@@ -267,6 +297,7 @@ async function ls_folder ({ fid, not_teamdrive, service_account }) {
       return files
     }
     files = files.concat(data.files)
+    argv.sfl && console.log('files.length:', files.length)
     pageToken = data.nextPageToken
   } while (pageToken)
 
@@ -310,7 +341,7 @@ async function get_sa_token () {
     try {
       return await real_get_sa_token(tk)
     } catch (e) {
-      console.log(e)
+      console.warn('SA获取access_token失败：', e.message)
       SA_TOKENS = SA_TOKENS.filter(v => v.gtoken !== tk.gtoken)
       if (!SA_TOKENS.length) SA_TOKENS = get_sa_batch()
     }
@@ -373,9 +404,9 @@ async function create_folder (name, parent, use_sa, limit) {
   throw new Error(err_message + ' 目录名：' + name)
 }
 
-async function get_name_by_id (fid) {
+async function get_name_by_id (fid, use_sa) {
   try {
-    const { name } = await get_info_by_id(fid, true)
+    const { name } = await get_info_by_id(fid, use_sa)
     return name
   } catch (e) {
     return fid
@@ -388,7 +419,7 @@ async function get_info_by_id (fid, use_sa) {
     includeItemsFromAllDrives: true,
     supportsAllDrives: true,
     corpora: 'allDrives',
-    fields: 'id,name, parents'
+    fields: 'id, name, size, parents, mimeType'
   }
   url += '?' + params_to_query(params)
   const headers = await gen_headers(use_sa)
@@ -457,7 +488,7 @@ async function real_copy ({ source, target, name, min_size, update, dncnr, not_t
   const record = db.prepare('select * from task where source=? and target=?').get(source, target)
   if (record) {
     const copied = db.prepare('select fileid from copied where taskid=?').all(record.id).map(v => v.fileid)
-    const choice = is_server ? 'continue' : await user_choose()
+    const choice = (is_server || argv.yes) ? 'continue' : await user_choose()
     if (choice === 'exit') {
       return console.log('退出程序')
     } else if (choice === 'continue') {
@@ -552,6 +583,7 @@ async function copy_files ({ files, mapping, service_account, root, task_id }) {
   do {
     if (err) {
       clearInterval(loop)
+      files = null
       throw err
     }
     if (concurrency > PARALLEL_LIMIT) {
@@ -576,8 +608,8 @@ async function copy_files ({ files, mapping, service_account, root, task_id }) {
     }).finally(() => {
       concurrency--
     })
-  } while (concurrency)
-  clearInterval(loop)
+  } while (concurrency || files.length)
+  return clearInterval(loop)
   // const limit = pLimit(PARALLEL_LIMIT)
   // let count = 0
   // const loop = setInterval(() => {
@@ -614,6 +646,7 @@ async function copy_file (id, parent, use_sa, limit, task_id) {
     }
     try {
       const { data } = await axins.post(url, { parents: [parent] }, config)
+      gtoken.flaged = false
       return data
     } catch (err) {
       retry++
@@ -623,12 +656,17 @@ async function copy_file (id, parent, use_sa, limit, task_id) {
       if (message && message.toLowerCase().includes('file limit')) {
         if (limit) limit.clearQueue()
         if (task_id) db.prepare('update task set status=? where id=?').run('error', task_id)
-        throw new Error('您的团队盘文件数已超限，停止复制')
+        throw new Error(FILE_EXCEED_MSG)
       }
       if (use_sa && message && message.toLowerCase().includes('rate limit')) {
-        SA_TOKENS = SA_TOKENS.filter(v => v.gtoken !== gtoken)
-        if (!SA_TOKENS.length) SA_TOKENS = get_sa_batch()
-        console.log('此帐号触发使用限额，剩余可用service account帐号数量：', SA_TOKENS.length)
+        if (gtoken.flaged) {
+          SA_TOKENS = SA_TOKENS.filter(v => v.gtoken !== gtoken)
+          if (!SA_TOKENS.length) SA_TOKENS = get_sa_batch()
+          console.log('此帐号连续两次触发使用限额，剩余可用SA数量：', SA_TOKENS.length)
+        } else {
+          console.log('此帐号触发使用限额，已标记，若下次请求正常则解除标记，否则剔除此SA')
+          gtoken.flaged = true
+        }
       }
     }
   }
@@ -642,6 +680,7 @@ async function copy_file (id, parent, use_sa, limit, task_id) {
 }
 
 async function create_folders ({ source, old_mapping, folders, root, task_id, service_account }) {
+  if (argv.dncf) return {} // do not copy folders
   if (!Array.isArray(folders)) throw new Error('folders must be Array:' + folders)
   const mapping = old_mapping || {}
   mapping[source] = root
@@ -738,7 +777,7 @@ async function confirm_dedupe ({ file_number, folder_number }) {
 
 // 需要sa是源文件夹所在盘的manager
 async function mv_file ({ fid, new_parent, service_account }) {
-  const file = await get_info_by_id(fid)
+  const file = await get_info_by_id(fid, service_account)
   if (!file) return
   const removeParents = file.parents[0]
   let url = `https://www.googleapis.com/drive/v3/files/${fid}`
@@ -775,7 +814,7 @@ async function rm_file ({ fid, service_account }) {
   }
 }
 
-async function dedupe ({ fid, update, service_account }) {
+async function dedupe ({ fid, update, service_account, yes }) {
   let arr
   if (!update) {
     const info = get_all_by_fid(fid)
@@ -788,7 +827,7 @@ async function dedupe ({ fid, update, service_account }) {
   const dupes = find_dupe(arr)
   const folder_number = dupes.filter(v => v.mimeType === FOLDER_TYPE).length
   const file_number = dupes.length - folder_number
-  const choice = await confirm_dedupe({ file_number, folder_number })
+  const choice = yes || await confirm_dedupe({ file_number, folder_number })
   if (choice === 'no') {
     return console.log('退出程序')
   } else if (!choice) {
@@ -808,7 +847,8 @@ async function dedupe ({ fid, update, service_account }) {
         file_count++
       }
     } catch (e) {
-      console.log('删除失败', e.message)
+      console.log('删除失败', v)
+      handle_error(e)
     }
   }))
   return { file_count, folder_count }
@@ -832,4 +872,4 @@ function print_progress (msg) {
   }
 }
 
-module.exports = { ls_folder, count, validate_fid, copy, dedupe, copy_file, gen_count_body, real_copy, get_name_by_id }
+module.exports = { ls_folder, count, validate_fid, copy, dedupe, copy_file, gen_count_body, real_copy, get_name_by_id, get_info_by_id, get_access_token, get_sa_token, walk_and_save }
