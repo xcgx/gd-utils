@@ -203,7 +203,7 @@ async function walk_and_save ({ fid, not_teamdrive, update, service_account }) {
 
   const loop = setInterval(() => {
     const now = dayjs().format('HH:mm:ss')
-    const message = `${now} | 已获取对象 ${result.length} | 网络请求 进行中${limit.activeCount}/排队中${limit.pendingCount}\n`
+    const message = `${now} | 已获取对象 ${result.length} | 网络请求 进行中${limit.activeCount}/排队中${limit.pendingCount}`
     print_progress(message)
   }, 3000)
 
@@ -573,7 +573,7 @@ async function copy_files ({ files, mapping, service_account, root, task_id }) {
 
   const loop = setInterval(() => {
     const now = dayjs().format('HH:mm:ss')
-    const message = `${now} | 已复制文件数 ${count} | 排队中文件数 ${files.length}\n`
+    const message = `${now} | 已复制文件数 ${count} | 排队中文件数 ${files.length}`
     print_progress(message)
   }, 3000)
 
@@ -694,7 +694,7 @@ async function create_folders ({ source, old_mapping, folders, root, task_id, se
 
   const loop = setInterval(() => {
     const now = dayjs().format('HH:mm:ss')
-    const message = `${now} | 已创建目录 ${count} | 网络请求 进行中${limit.activeCount}/排队中${limit.pendingCount}\n`
+    const message = `${now} | 已创建目录 ${count} | 网络请求 进行中${limit.activeCount}/排队中${limit.pendingCount}`
     print_progress(message)
   }, 3000)
 
